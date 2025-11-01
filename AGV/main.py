@@ -1,3 +1,4 @@
+
 import cv2
 import numpy as np
 import time
@@ -7,8 +8,6 @@ import threading
 import record
 
 model= YOLO("yolov8s.pt")
-
-
 
 cap=cv2.VideoCapture(0)
 last_alert_ts=0

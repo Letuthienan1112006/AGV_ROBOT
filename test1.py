@@ -1,65 +1,100 @@
+import socket
+import json
+import base64
+import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 
-# thông số xe
-L = 0.25          # chiều dài cơ sở (m)
-v = 0.3           # vận tốc (m/s)
-dt = 0.05
+HOST = "127.0.0.1"
+PORT = 54321
 
-# đường cần bám (hình sin hoặc thẳng)
-path_x = np.arange(0, 8, 0.1)
-path_y = 0.5 * np.sin(0.5 * path_x)
+# tăng buffer lên cho chắc
+MAX_BUF = 500_000   # 500 KB
 
-# trạng thái xe ban đầu
-x, y, yaw = 0.0, -0.5, 0.0     # lệch dưới đường
-L_d = 0.6                      # look-ahead distance
+def connect_map():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((HOST, PORT))
+    print(f"[OK] Connected to map {HOST}:{PORT}")
+    return s
 
-def pure_pursuit_control(x, y, yaw):
-    # tìm điểm đích look-ahead
-    dists = np.hypot(path_x - x, path_y - y)
-    idx = np.argmin(np.abs(dists - L_d))
-    tx, ty = path_x[idx], path_y[idx]
+def recv_frame(sock):
+    """
+    Nhận 1 gói JSON. Có debug.
+    """
+    try:
+        data = sock.recv(MAX_BUF)
+    except Exception as e:
+        print("[ERR] recv error:", e)
+        return None, None, None
 
-    # góc tới mục tiêu
-    alpha = np.arctan2(ty - y, tx - x) - yaw
-    # góc lái
-    delta = np.arctan2(2*L*np.sin(alpha), L_d)
-    return delta, tx, ty
+    if not data:
+        print("[WARN] empty data from simulator")
+        return None, None, None
 
-# lưu dữ liệu để vẽ
-xs, ys, yaws, deltas = [x], [y], [yaw], []
+    # debug: xem gói to bao nhiêu
+    print(f"[DBG] received {len(data)} bytes")
 
-for _ in range(300):
-    delta, tx, ty = pure_pursuit_control(x, y, yaw)
-    # giới hạn góc lái ±30°
-    delta = np.clip(delta, -np.radians(30), np.radians(30))
-    # cập nhật trạng thái xe
-    x += v*np.cos(yaw)*dt
-    y += v*np.sin(yaw)*dt
-    yaw += (v/L)*np.tan(delta)*dt
+    try:
+        pkg = json.loads(data)
+    except Exception as e:
+        print("[ERR] json.loads failed:", e)
+        # in thử vài ký tự đầu để xem simulator gửi gì
+        print(data[:200])
+        return None, None, None
 
-    xs.append(x); ys.append(y); yaws.append(yaw); deltas.append(delta)
+    # giải mã ảnh
+    if "Img" not in pkg:
+        print("[ERR] 'Img' key not found in JSON")
+        return None, None, None
 
-# ---- animation ----
-fig, ax = plt.subplots()
-ax.plot(path_x, path_y, 'b--', label='Target path')
-car, = ax.plot([], [], 'r-', lw=2, label='Car body')
-look, = ax.plot([], [], 'go', label='Look-ahead')
-ax.set_xlim(-1, 8); ax.set_ylim(-2, 2)
-ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)"); ax.legend(); ax.grid(True)
+    try:
+        img_bytes = base64.b64decode(pkg["Img"])
+        img_np = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+    except Exception as e:
+        print("[ERR] image decode failed:", e)
+        return None, None, None
 
-def update(i):
-    # hình chữ nhật mô tả xe
-    car_len, car_wid = 0.3, 0.15
-    cx, cy, th = xs[i], ys[i], yaws[i]
-    car_x = [cx + car_len*np.cos(th), cx - car_len*np.cos(th)]
-    car_y = [cy + car_len*np.sin(th), cy - car_len*np.sin(th)]
-    car.set_data(car_x, car_y)
-    # điểm look-ahead
-    delta, tx, ty = pure_pursuit_control(cx, cy, th)
-    look.set_data([tx],[ty])
-    return car, look
+    angle = pkg.get("Angle", 0.0)
+    speed = pkg.get("Speed", 0.0)
+    return frame, angle, speed
 
-ani = animation.FuncAnimation(fig, update, frames=len(xs), interval=50)
-plt.show()
+def send_control(sock, angle_cmd, speed_cmd):
+    msg = f"{angle_cmd} {speed_cmd}"
+    try:
+        sock.sendall(msg.encode("utf-8"))
+    except Exception as e:
+        print("[ERR] send_control failed:", e)
+
+if __name__ == "__main__":
+    sock = connect_map()
+
+    try:
+        while True:
+            frame, ang, spd = recv_frame(sock)
+            if frame is None:
+                # nếu lỗi thì tiếp tục chứ đừng thoát liền
+                continue
+
+            # resize cho chắc
+            frame = cv2.resize(frame, (640, 480))
+
+            # vẽ info
+            cv2.putText(frame, f"sim angle: {ang}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+            cv2.putText(frame, f"sim speed: {spd}", (10, 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+
+            # HIỂN THỊ ĐÚNG TÊN EM MUỐN
+            cv2.imshow("AGV View", frame)
+
+            # gửi lệnh tạm (0 0)
+            send_control(sock, 0, 0)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+
+    finally:
+        sock.close()
+        # 
+      
